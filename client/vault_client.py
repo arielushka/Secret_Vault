@@ -1,4 +1,5 @@
 ﻿import json
+import os
 import socket
 from pathlib import Path
 import ssl
@@ -11,9 +12,9 @@ from client.file_manager import decrypt_file, prepare_upload
 
 
 class VaultClient:
-    def __init__(self, host="127.0.0.1", port=5000):
-        self.host = host
-        self.port = port
+    def __init__(self, host=None, port=None):
+        self.host = host or os.environ.get("SECRET_VAULT_HOST", "127.0.0.1")
+        self.port = port or int(os.environ.get("SECRET_VAULT_PORT", "5000"))
         self.sock = None
         self.user_id = None
         self.rsa_manager = None

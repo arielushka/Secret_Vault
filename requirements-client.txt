@@ -1,2 +1,0 @@
-cryptography>=42
-shamir-mnemonic>=0.3

@@ -1,9 +1,11 @@
 ﻿import base64
 import binascii
 import sqlite3
+import time
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent.parent / "database" / "vault.db"
+OPEN_FILE_SECONDS = 60
 
 
 def connect():
@@ -31,6 +33,7 @@ def create_tables():
                 filename TEXT NOT NULL,
                 storage_path TEXT NOT NULL,
                 threshold INTEGER NOT NULL CHECK (threshold >= 2),
+                opened_at REAL,
                 FOREIGN KEY (owner_id) REFERENCES users(id)
             )
         """)
@@ -45,6 +48,9 @@ def create_tables():
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
         """)
+        file_columns = [row[1] for row in conn.execute("PRAGMA table_info(files)")]
+        if "opened_at" not in file_columns:
+            conn.execute("ALTER TABLE files ADD COLUMN opened_at REAL")
         old_table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='file_shares'"
         ).fetchone()
@@ -71,9 +77,38 @@ def create_tables():
         conn.execute("DROP TABLE IF EXISTS opening_votes")
         conn.execute("DROP TABLE IF EXISTS opening_sessions")
         conn.execute("DROP TABLE IF EXISTS file_shares")
+        conn.execute("""
+            UPDATE files SET opened_at=?
+            WHERE opened_at IS NULL AND
+                  (SELECT COUNT(*) FROM file_recipients r
+                   WHERE r.file_id=files.id AND r.approved=1) >= files.threshold
+        """, (time.time(),))
         conn.commit()
     finally:
         conn.close()
+
+
+def delete_expired_files(now=None):
+    """Delete files, their cascading shares, and ciphertext after the open window."""
+    if now is None:
+        now = time.time()
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, storage_path FROM files WHERE opened_at IS NOT NULL AND opened_at <= ?",
+            (now - OPEN_FILE_SECONDS,)
+        ).fetchall()
+        if rows:
+            conn.executemany("DELETE FROM files WHERE id=?", [(row[0],) for row in rows])
+            conn.commit()
+    finally:
+        conn.close()
+    for _, storage_path in rows:
+        try:
+            Path(storage_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+    return len(rows)
 
 
 def get_users():
@@ -117,20 +152,28 @@ def save_file(owner_id, filename, path, threshold, recipients):
 
 
 def list_files(user_id, owner_only=False):
+    delete_expired_files()
     conn = connect()
     try:
         if owner_only:
             rows = conn.execute(
                 """SELECT f.id, f.filename, f.threshold, u.username, f.owner_id
                    FROM files f JOIN users u ON u.id=f.owner_id
-                   WHERE f.owner_id=? ORDER BY f.id""", (user_id,)
+                   WHERE f.owner_id=?
+                     AND (f.opened_at IS NULL OR EXISTS (
+                         SELECT 1 FROM file_recipients r
+                         WHERE r.file_id=f.id AND r.user_id=? AND r.approved=1
+                     ))
+                   ORDER BY f.id""", (user_id, user_id)
             ).fetchall()
         else:
             rows = conn.execute(
                 """SELECT f.id, f.filename, f.threshold, u.username, f.owner_id
                    FROM files f JOIN users u ON u.id=f.owner_id
                    JOIN file_recipients r ON r.file_id=f.id
-                   WHERE r.user_id=? AND f.owner_id!=? ORDER BY f.id""",
+                   WHERE r.user_id=? AND f.owner_id!=?
+                     AND (f.opened_at IS NULL OR r.approved=1)
+                   ORDER BY f.id""",
                 (user_id, user_id)
             ).fetchall()
         files = []
@@ -144,17 +187,20 @@ def list_files(user_id, owner_only=False):
         conn.close()
 
 def file_info(file_id, user_id):
+    delete_expired_files()
     conn = connect()
     try:
         row = conn.execute(
             """SELECT f.filename, f.threshold, f.owner_id, u.username,
                       r.approved,
                       (SELECT COUNT(*) FROM file_recipients
-                       WHERE file_id=f.id AND approved=1)
+                       WHERE file_id=f.id AND approved=1),
+                      f.opened_at
                FROM files f JOIN users u ON u.id=f.owner_id
                LEFT JOIN file_recipients r
                  ON r.file_id=f.id AND r.user_id=?
-               WHERE f.id=? AND (f.owner_id=? OR r.user_id IS NOT NULL)""",
+               WHERE f.id=? AND (f.owner_id=? OR r.user_id IS NOT NULL)
+                 AND (f.opened_at IS NULL OR r.approved=1)""",
             (user_id, file_id, user_id)
         ).fetchone()
         if row is None:
@@ -178,20 +224,27 @@ def file_info(file_id, user_id):
             "file_id": file_id, "filename": row[0], "threshold": row[1],
             "owner_id": row[2], "owner": row[3],
             "your_approval": bool(row[4]), "approval_count": row[5],
+            "opened_at": row[6],
             "my_encrypted_share": my_share, "recipients": recipients
         }
     finally:
         conn.close()
 
 def set_approval(file_id, share_owner_id, approved, encrypted_shares=None):
+    delete_expired_files()
     conn = connect()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         recipient = conn.execute(
-            "SELECT 1 FROM file_recipients WHERE file_id=? AND user_id=?",
+            """SELECT r.approved, f.opened_at
+               FROM file_recipients r JOIN files f ON f.id=r.file_id
+               WHERE r.file_id=? AND r.user_id=?""",
             (file_id, share_owner_id)
         ).fetchone()
         if recipient is None:
             raise ValueError("You are not allowed to approve this file")
+        if recipient[1] is not None:
+            raise ValueError("The file is already open")
         if approved:
             if not isinstance(encrypted_shares, list):
                 raise ValueError("Encrypted shares are required")
@@ -234,6 +287,12 @@ def set_approval(file_id, share_owner_id, approved, encrypted_shares=None):
                 "UPDATE file_recipients SET approved=1 WHERE file_id=? AND user_id=?",
                 (file_id, share_owner_id)
             )
+            conn.execute(
+                """UPDATE files SET opened_at=COALESCE(opened_at, ?)
+                   WHERE id=? AND (SELECT COUNT(*) FROM file_recipients
+                                   WHERE file_id=? AND approved=1) >= threshold""",
+                (time.time(), file_id, file_id)
+            )
         else:
             conn.execute(
                 "UPDATE file_recipients SET approved=0 WHERE file_id=? AND user_id=?",
@@ -252,15 +311,20 @@ def set_approval(file_id, share_owner_id, approved, encrypted_shares=None):
 
 
 def download_file(file_id, user_id):
+    delete_expired_files()
     conn = connect()
     try:
         file_row = conn.execute(
-            """SELECT f.filename, f.storage_path, f.threshold
+            """SELECT f.filename, f.storage_path, f.threshold, f.opened_at, r.approved
                FROM files f JOIN file_recipients r ON r.file_id=f.id
                WHERE f.id=? AND r.user_id=?""", (file_id, user_id)
         ).fetchone()
         if file_row is None:
             raise ValueError("You are not allowed to download this file")
+        if file_row[3] is None:
+            raise ValueError("The file is not open yet")
+        if not file_row[4]:
+            raise ValueError("Only users who approved this file can access it")
         count = conn.execute(
             "SELECT COUNT(*) FROM file_recipients WHERE file_id=? AND approved=1",
             (file_id,)
@@ -287,14 +351,20 @@ def download_file(file_id, user_id):
 
 
 def delete_file(file_id, owner_id):
+    delete_expired_files()
     conn = connect()
     try:
         row = conn.execute(
-            "SELECT storage_path FROM files WHERE id=? AND owner_id=?",
-            (file_id, owner_id)
+            """SELECT f.storage_path, f.opened_at,
+                      EXISTS(SELECT 1 FROM file_recipients r
+                             WHERE r.file_id=f.id AND r.user_id=? AND r.approved=1)
+               FROM files f WHERE f.id=? AND f.owner_id=?""",
+            (owner_id, file_id, owner_id)
         ).fetchone()
         if row is None:
             raise ValueError("Only the owner can delete this file")
+        if row[1] is not None and not row[2]:
+            raise ValueError("Only users who approved this file can access it")
         conn.execute("DELETE FROM files WHERE id=?", (file_id,))
         conn.commit()
         try:

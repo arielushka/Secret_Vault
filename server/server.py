@@ -1,13 +1,17 @@
 ﻿import socket
 import threading
 import ssl
+import os
+import sqlite3
+import time
 from common.protocol import recv_message, send_message
-from server.database import create_tables
+from server.database import create_tables, delete_expired_files
 from server.handlers import handle_request
 from server.session import Session
 
-HOST = "127.0.0.1"
-PORT = 5000
+# Listen on all interfaces for private-LAN clients; restrict access with the host firewall.
+HOST = os.environ.get("SECRET_VAULT_BIND_HOST", "0.0.0.0")
+PORT = int(os.environ.get("SECRET_VAULT_PORT", "5000"))
 
 
 def handle_client(sock, address):
@@ -46,6 +50,15 @@ def handle_secure_client(client, address, context):
         client.close()
 
 
+def expire_open_files():
+    while True:
+        try:
+            delete_expired_files()
+        except (OSError, sqlite3.Error) as error:
+            print("File cleanup error:", error)
+        time.sleep(0.5)
+
+
 def main():
     create_tables()
 
@@ -56,8 +69,9 @@ def main():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind((HOST, PORT))
     server.listen()
+    threading.Thread(target=expire_open_files, daemon=True).start()
 
-    print("Server listening on port", PORT)
+    print(f"Server listening on {HOST}:{PORT}")
 
     try:
         while True:

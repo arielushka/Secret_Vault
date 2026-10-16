@@ -99,57 +99,75 @@ def upload_file(client):
 
 
 def show_files(client, action):
-    response = client.request(action)
-    print(f"Note: To refresh the files list, go back and open {action}")
-    if response.get("status") != "OK":
-        show_response(response)
-        return
-    files = response["data"]["files"]
-    if not files:
-        print("No files found")
-        return
-    for file in files:
-        print(
-            f"{file['file_id']}: {file['filename']} (threshold {file['threshold']}) — {file['owner']}")
-    file_id = read_number("File ID, or 0 to go back: ")
-    if file_id == 0:
-        return
-    show_file(client, file_id)
-
+    while True:
+        response = client.request(action)
+        if response.get("status") != "OK":
+            show_response(response)
+            return
+        files = response["data"]["files"]
+        if not files:
+            print("No files found")
+        else:
+            for file in files:
+                print(
+                    f"{file['file_id']}: {file['filename']} (threshold {file['threshold']}) — {file['owner']}")
+        print("f. Refresh")
+        file_id = input("File ID, f to refresh, or 0 to go back: ").strip().lower()
+        if file_id == "0":
+            return
+        if file_id == "f":
+            continue
+        if not file_id.isdigit():
+            print("Enter a file ID, f, or 0")
+            continue
+        selected_id = int(file_id)
+        if selected_id and any(item["file_id"] == selected_id for item in files):
+            show_file(client, selected_id)
+        elif selected_id:
+            print("File not found in this list")
 
 def show_file(client, file_id):
     response = client.file_info(file_id)
     if response.get("status") != "OK":
         show_response(response)
         return
-    print(f"Note: To refresh the file info, go back and open {file_id}")
     info = response["data"]
-    print(f"\nFile: {info['filename']}")
-    print(f"Owner: {info['owner']}")
-    print(f"Approvals: {info['approval_count']}/{info['threshold']}")
-    print("Your approval:", "Active" if info["your_approval"] else "Inactive")
     while True:
+        print(f"\nFile: {info['filename']}")
+        print(f"Owner: {info['owner']}")
+        print(f"Approvals: {info['approval_count']}/{info['threshold']}")
+        print("Your approval:", "Active" if info["your_approval"] else "Inactive")
+        opened = info["opened_at"] is not None
+        print("Status:", "Open" if opened else "Waiting for approvals")
         actions = []
-        if info["owner_id"] == client.user_id:
-            actions.append(("d", "Delete file"))
-        if info["my_encrypted_share"] is not None:
+        if not opened and info["my_encrypted_share"] is not None:
             if info["your_approval"]:
                 actions.append(("r", "Revoke approval"))
             else:
                 actions.append(("a", "Approve share"))
-            if info["approval_count"] >= info["threshold"]:
-                actions.append(("o", "Download file"))
+        if opened and info["your_approval"]:
+            actions.append(("o", "Download file"))
+        if info["owner_id"] == client.user_id and (not opened or info["your_approval"]):
+            actions.append(("d", "Delete file"))
+        actions.append(("f", "Refresh"))
+        actions.append(("b", "Back"))
         for key, label in actions:
             print(f"{key}. {label}")
-        print("b. Back")
         choice = input("> ").strip().lower()
         if choice == "b":
             return
+        if choice == "f":
+            response = client.file_info(file_id)
+            if response.get("status") != "OK":
+                show_response(response)
+                return
+            info = response["data"]
+            continue
         selected = None
         for key, label in actions:
             if key == choice:
                 selected = key
-        if selected is None:
+        if selected is None or selected in ("f", "b"):
             print("Choose one of the listed options")
             continue
         try:
@@ -170,11 +188,12 @@ def show_file(client, file_id):
                     show_response(client.delete_file(file_id))
                     return
             response = client.file_info(file_id)
-            if response.get("status") == "OK":
-                info = response["data"]
+            if response.get("status") != "OK":
+                show_response(response)
+                return
+            info = response["data"]
         except Exception as error:
             print("Could not complete action:", error)
-
 
 def logged_in_menu(client):
     while client.user_id is not None:

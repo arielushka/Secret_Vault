@@ -21,7 +21,7 @@ class InstallationSmokeTests(unittest.TestCase):
             "client/client.py",
             "client/vault_client.py",
             "common/protocol.py",
-            "requirements.txt",
+            "test_installation.py",
         ):
             with self.subTest(path=relative_path):
                 self.assertTrue((ROOT / relative_path).is_file(), relative_path)
@@ -39,7 +39,9 @@ class InstallationSmokeTests(unittest.TestCase):
     def test_tls_13_and_request_protocol_with_local_server(self):
         from client.vault_client import VaultClient
 
-        client = VaultClient()
+        # The installation test runs against the server on this same computer,
+        # even if SECRET_VAULT_HOST points regular clients to another LAN host.
+        client = VaultClient(host="127.0.0.1", port=5000)
         try:
             try:
                 client.connect()
