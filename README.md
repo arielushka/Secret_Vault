@@ -1,4 +1,4 @@
-﻿# Secret-Vault
+# Secret-Vault
 
 Secret-Vault היא תוכנת CLI לשיתוף קבצים מוצפנים. בעל הקובץ בוחר 2–16 משתמשים מורשים וסף אישורים. הקובץ, המפתח הפרטי ושחזור המפתח נשארים בצד הלקוח; השרת מנהל חשבונות, הרשאות וחומר מוצפן.
 
@@ -25,11 +25,11 @@ Secret-Vault היא תוכנת CLI לשיתוף קבצים מוצפנים. בע�
 git clone --filter=blob:none --no-checkout https://github.com/arielushka/Secret_Vault.git Secret_Vault-server
 Set-Location Secret_Vault-server
 git sparse-checkout init --no-cone
-git sparse-checkout set '/README.md' '/server/**' '/common/**' '/requirements-server.txt' '/server.crt'
+git sparse-checkout set '/README.md' '/server/**' '/common/**' '/server.crt'
 git checkout main
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements-server.txt
+python -m pip install argon2-cffi cryptography
 ```
 
 ### הורדת הלקוח בלבד
@@ -38,49 +38,26 @@ python -m pip install -r requirements-server.txt
 git clone --filter=blob:none --no-checkout https://github.com/arielushka/Secret_Vault.git Secret_Vault-client
 Set-Location Secret_Vault-client
 git sparse-checkout init --no-cone
-git sparse-checkout set '/README.md' '/client/**' '/common/**' '/requirements-client.txt' '/server.crt'
+git sparse-checkout set '/README.md' '/client/**' '/common/**' '/server.crt'
 git checkout main
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements-client.txt
+python -m pip install cryptography shamir-mnemonic
 ```
 
 ### הורדת השרת והלקוח יחד
 
-הקובץ `requirements.txt` נמצא בפרויקט המלא וכולל את התלויות של שני הצדדים.
+ההורדה המלאה כוללת את קוד השרת והלקוח ואת קובץ בדיקת ההתקנה. מתקינים את כל התלויות יחד:
 
 ```powershell
 git clone https://github.com/arielushka/Secret_Vault.git Secret_Vault
 Set-Location Secret_Vault
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m pip install argon2-cffi cryptography shamir-mnemonic
 ```
 
-אפשר להריץ את השרת והלקוח באותה סביבת Python, או ליצור סביבה נפרדת לכל אחד ולהתקין בה את `requirements-server.txt` או `requirements-client.txt`.
-
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-במחשב השרת התקינו את תלויות השרת:
-
-```powershell
-python -m pip install -r requirements-server.txt
-```
-
-במחשב לקוח התקינו את תלויות הלקוח:
-
-```powershell
-python -m pip install -r requirements-client.txt
-```
-
-אם רוצים להתקין את כל התלויות באותה סביבה, משתמשים בקובץ המלא:
-
-```powershell
-python -m pip install -r requirements.txt
-```
+להתקנה נפרדת: בשרת מריצים `python -m pip install argon2-cffi cryptography`; בלקוח מריצים `python -m pip install cryptography shamir-mnemonic`. בהורדה המלאה מתקינים את שלוש החבילות יחד, כפי שמופיע למעלה. אין בפרויקט קובצי `requirements.txt`.
 
 ## הפעלה
 
@@ -90,21 +67,23 @@ python -m pip install -r requirements.txt
 python -m server.server
 ```
 
-השרת דורש TLS 1.3. במחשב השרת, מתוך תיקיית הפרויקט, מריצים פעם אחת לפני ההפעלה את פקודת OpenSSL הבאה. היא יוצרת את תעודת השרת `server.crt` ואת המפתח הפרטי `server.key` עבור עבודה מקומית עם `localhost` ו־`127.0.0.1`:
+השרת דורש TLS 1.3 ומאזין כברירת מחדל בכל ממשקי הרשת בפורט 5000. במחשב השרת, מתוך תיקיית הפרויקט, יוצרים פעם אחת תעודת TLS ומפתח פרטי. החליפו את `192.168.1.20` בכתובת ה־IPv4 הקבועה או השמורה של מחשב השרת ברשת הפרטית:
 
 ```powershell
-openssl req -x509 -newkey rsa:2048 -nodes -keyout server.key -out server.crt -days 365 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+openssl req -x509 -newkey rsa:2048 -nodes -keyout server.key -out server.crt -days 365 -subj "/CN=192.168.1.20" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:192.168.1.20"
 ```
 
-את `server.key` משאירים במחשב השרת בלבד ואין מעלים אותו ל־Git או שולחים ללקוחות. אחרי יצירת התעודה, מעבירים לכל לקוח את `server.crt` ושומרים אותו בתיקיית הפרויקט, כי הלקוח קורא אותו משם כדי לאמת את תעודת השרת. הלקוחות אינם מריצים OpenSSL.
+את `server.key` משאירים במחשב השרת בלבד ואין מעלים אותו ל־Git או שולחים ללקוחות. מעבירים לכל לקוח את `server.crt` שנוצר ושומרים אותו בתיקיית הפרויקט; הלקוח משתמש בו כדי לאמת את תעודת השרת. הלקוחות אינם מריצים OpenSSL. יש להעביר את התעודה בערוץ אמין, ולוודא שה־IP שהלקוח יתחבר אליו מופיע ב־SAN של התעודה.
 
-בטרמינל נוסף הפעילו לקוח. אפשר לפתוח כמה לקוחות כדי להשתמש בכמה חשבונות:
+בכל מחשב לקוח, הגדירו את כתובת השרת לפי הכתובת בדוגמה לעיל ואז הפעילו את הלקוח. הגדירו זאת בכל חלון PowerShell שבו מריצים את התוכנה. אפשר לפתוח כמה לקוחות כדי להשתמש בכמה חשבונות:
 
 ```powershell
+$env:SECRET_VAULT_HOST = "192.168.1.20"
+$env:SECRET_VAULT_PORT = "5000"
 python -m client.client
 ```
 
-השרת מקשיב ב־`127.0.0.1:5000`.
+השרת מקשיב ב־`0.0.0.0:5000` כברירת מחדל. יש לאפשר חיבור נכנס ל־TCP/5000 בחומת האש של מחשב השרת בפרופיל הרשת הפרטית בלבד, ולהתחבר רק מתוך הרשת המהימנה. אין להגדיר העברת פורטים מהאינטרנט.
 
 השרת יוצר את `database/vault.db` ואת תיקיית `server/uploads` בהפעלה/בהעלאה. הרישום יוצר זוג מפתחות RSA-4096 אצל הלקוח ושומר את המפתח הפרטי בקובץ PEM מוגן בסיסמה. סיסמאות החשבון נשמרות בשרת כ־Argon2 hash.
 
@@ -116,7 +95,7 @@ python -m client.client
 - `common/protocol.py`: מסגור הודעות JSON מעל TCP (עד 16 MiB להודעה).
 - `server/server.py`, `server/handlers.py`: חיבורים וניתוב בקשות מאומתות.
 - `server/file_handler.py`, `server/database.py`: אימות העלאות, קובצי ciphertext ומסד SQLite.
-- כרגע אין בפרויקט תיקיית בדיקות; ראו את סעיף הבדיקות למטה.
+- `test_installation.py`: בדיקת עשן להתקנה מלאה של השרת והלקוח.
 
 ## אישור מפתחות ציבוריים
 
@@ -130,17 +109,17 @@ python -m client.client
 
 ## בדיקת התקנה מלאה
 
-הקובץ `test_installation.py` נמצא בהורדה המלאה בלבד, כי הוא בודק גם את קובצי השרת וגם את קובצי הלקוח. אחרי התקנת כל התלויות, יצירת התעודה והמפתח עם OpenSSL, והפעלת השרת בטרמינל הראשון, הריצו בטרמינל נוסף:
+הקובץ `test_installation.py` נמצא בהורדה המלאה בלבד, כי הוא בודק את קובצי שני הצדדים ואת החיבור ביניהם. אחרי התקנת התלויות של שניהם, יצירת התעודה והמפתח עם OpenSSL והפעלת השרת, הריצו בחלון PowerShell נוסף על אותו מחשב שבו רץ השרת:
 
 ```powershell
 python -m unittest test_installation -v
 ```
 
-הבדיקה מוודאת שהתלויות וקובצי שני הצדדים זמינים, יוצרת חיבור TLS 1.3 לשרת המקומי, ושולחת בקשת פרוטוקול לא מאומתת כדי לוודא שהשרת מחזיר את שגיאת ההתחברות הנדרשת. היא אינה יוצרת משתמש או משנה קבצים במסד הנתונים.
+הבדיקה מוודאת שהתלויות וקובצי שני הצדדים זמינים, שהתעודה והמפתח תואמים, יוצרת חיבור TLS 1.3 לשרת המקומי ושולחת בקשת פרוטוקול לא מאומתת כדי לוודא שהשרת מחזיר את שגיאת ההתחברות הנדרשת. היא אינה יוצרת משתמש או משנה קבצים במסד הנתונים.
 
 ## מגבלות
 
-- השרת כרגע מאזין רק ל־localhost ומשתמש ב־TLS 1.3 עם תעודה מקומית. אין לחשוף אותו לרשת בלי הגדרת תעודה, אמון לקוחות ואמצעי אבטחה נוספים.
+- השרת מאזין ברשת ב־TCP/5000 ומשתמש ב־TLS 1.3. השימוש מיועד לרשת פרטית מהימנה בלבד; יש להגביל את חומת האש ואין לחשוף את הפורט לאינטרנט.
 - מגבלת העלאה בצד השרת היא 10 MiB לקובץ מוצפן; מגבלת הודעת הפרוטוקול היא 16 MiB.
 - טביעת אצבע שמתקבלת רק מהשרת אינה מוכיחה את זהות המשתמש. צריך להשוות אותה בדרך אמינה מחוץ לשרת.
 - משתמש שקיבל קובץ מפוענח יכול לשמור או להעביר אותו.
