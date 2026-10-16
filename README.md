@@ -59,7 +59,7 @@ python -m client.client
 - `common/protocol.py`: מסגור הודעות JSON מעל TCP (עד 16 MiB להודעה).
 - `server/server.py`, `server/handlers.py`: חיבורים וניתוב בקשות מאומתות.
 - `server/file_handler.py`, `server/database.py`: אימות העלאות, קובצי ciphertext ומסד SQLite.
-- `tests/test_approval_flow.py`: בדיקות רכיבים וזרימת אישור/הורדה מקצה לקצה.
+- כרגע אין בפרויקט תיקיית בדיקות; ראו את סעיף הבדיקות למטה.
 
 ## אישור מפתחות ציבוריים
 
