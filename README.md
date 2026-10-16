@@ -17,11 +17,34 @@ Secret-Vault היא תוכנת CLI לשיתוף קבצים מוצפנים. בע�
 
 ## התקנה
 
-ב־PowerShell, מתיקיית הפרויקט:
+יש בפרויקט `requirements.txt` להתקנה מלאה, וגם קובצי תלויות נפרדים להתקנת שרת או לקוח בלבד:
+
+- `requirements-server.txt`: `argon2-cffi` לשמירת סיסמאות ו־`cryptography` לאימות מפתחות ציבוריים.
+- `requirements-client.txt`: `cryptography` להצפנה ו־RSA, ו־`shamir-mnemonic` לחלוקה ולשחזור של Shares.
+- `requirements.txt`: כל התלויות של השרת והלקוח יחד.
+
+ב־PowerShell, מתיקיית הפרויקט, הקימו סביבת Python נפרדת במחשב השרת ובכל מחשב לקוח:
 
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
+```
+
+במחשב השרת התקינו את תלויות השרת:
+
+```powershell
+python -m pip install -r requirements-server.txt
+```
+
+במחשב לקוח התקינו את תלויות הלקוח:
+
+```powershell
+python -m pip install -r requirements-client.txt
+```
+
+אם רוצים להתקין את כל התלויות באותה סביבה, משתמשים בקובץ המלא:
+
+```powershell
 python -m pip install -r requirements.txt
 ```
 
@@ -33,13 +56,13 @@ python -m pip install -r requirements.txt
 python -m server.server
 ```
 
-השרת דורש TLS 1.3. הקובץ `server.crt` משמש את הלקוח לאימות השרת, ו־`server.key` הוא המפתח הפרטי של תעודת השרת. אין להעלות את `server.key` ל־Git. אם יוצרים זוג חדש, יש ליצור תעודה עם SAN עבור `localhost` ו־`127.0.0.1`, ולהפיץ את `server.crt` ללקוחות.
-
-לדוגמה, עם OpenSSL:
+השרת דורש TLS 1.3. לפני ההפעלה הראשונה, מנהל השרת מריץ פעם אחת את פקודת OpenSSL הבאה מתוך תיקיית הפרויקט. היא יוצרת את תעודת השרת `server.crt` ואת המפתח הפרטי `server.key` עבור עבודה מקומית עם `localhost` ו־`127.0.0.1`:
 
 ```powershell
 openssl req -x509 -newkey rsa:2048 -nodes -keyout server.key -out server.crt -days 365 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
 ```
+
+את `server.key` משאירים במחשב השרת בלבד ואין מעלים אותו ל־Git או שולחים ללקוחות. מעבירים לכל לקוח את `server.crt` ושומרים אותו בתיקיית הפרויקט, כי הלקוח קורא אותו משם כדי לאמת את תעודת השרת. הלקוחות אינם מריצים OpenSSL.
 
 בטרמינל נוסף הפעילו לקוח. אפשר לפתוח כמה לקוחות כדי להשתמש בכמה חשבונות:
 
