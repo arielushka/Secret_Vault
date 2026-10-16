@@ -17,13 +17,47 @@ Secret-Vault היא תוכנת CLI לשיתוף קבצים מוצפנים. בע�
 
 ## התקנה
 
-יש בפרויקט `requirements.txt` להתקנה מלאה, וגם קובצי תלויות נפרדים להתקנת שרת או לקוח בלבד:
+אפשר להוריד רק את קובצי השרת, רק את קובצי הלקוח, או את שניהם. הפקודות דורשות Git עם תמיכה ב־sparse checkout ו־PowerShell.
 
-- `requirements-server.txt`: `argon2-cffi` לשמירת סיסמאות ו־`cryptography` לאימות מפתחות ציבוריים.
-- `requirements-client.txt`: `cryptography` להצפנה ו־RSA, ו־`shamir-mnemonic` לחלוקה ולשחזור של Shares.
-- `requirements.txt`: כל התלויות של השרת והלקוח יחד.
+### הורדת השרת בלבד
 
-ב־PowerShell, מתיקיית הפרויקט, הקימו סביבת Python נפרדת במחשב השרת ובכל מחשב לקוח:
+```powershell
+git clone --filter=blob:none --no-checkout https://github.com/arielushka/Secret_Vault.git Secret_Vault-server
+Set-Location Secret_Vault-server
+git sparse-checkout init --no-cone
+git sparse-checkout set '/README.md' '/server/**' '/common/**' '/requirements-server.txt' '/server.crt'
+git checkout main
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-server.txt
+```
+
+### הורדת הלקוח בלבד
+
+```powershell
+git clone --filter=blob:none --no-checkout https://github.com/arielushka/Secret_Vault.git Secret_Vault-client
+Set-Location Secret_Vault-client
+git sparse-checkout init --no-cone
+git sparse-checkout set '/README.md' '/client/**' '/common/**' '/requirements-client.txt' '/server.crt'
+git checkout main
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-client.txt
+```
+
+### הורדת השרת והלקוח יחד
+
+הקובץ `requirements.txt` נמצא בפרויקט המלא וכולל את התלויות של שני הצדדים.
+
+```powershell
+git clone https://github.com/arielushka/Secret_Vault.git Secret_Vault
+Set-Location Secret_Vault
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+אפשר להריץ את השרת והלקוח באותה סביבת Python, או ליצור סביבה נפרדת לכל אחד ולהתקין בה את `requirements-server.txt` או `requirements-client.txt`.
 
 ```powershell
 py -3.12 -m venv .venv
@@ -56,13 +90,13 @@ python -m pip install -r requirements.txt
 python -m server.server
 ```
 
-השרת דורש TLS 1.3. לפני ההפעלה הראשונה, מנהל השרת מריץ פעם אחת את פקודת OpenSSL הבאה מתוך תיקיית הפרויקט. היא יוצרת את תעודת השרת `server.crt` ואת המפתח הפרטי `server.key` עבור עבודה מקומית עם `localhost` ו־`127.0.0.1`:
+השרת דורש TLS 1.3. במחשב השרת, מתוך תיקיית הפרויקט, מריצים פעם אחת לפני ההפעלה את פקודת OpenSSL הבאה. היא יוצרת את תעודת השרת `server.crt` ואת המפתח הפרטי `server.key` עבור עבודה מקומית עם `localhost` ו־`127.0.0.1`:
 
 ```powershell
 openssl req -x509 -newkey rsa:2048 -nodes -keyout server.key -out server.crt -days 365 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
 ```
 
-את `server.key` משאירים במחשב השרת בלבד ואין מעלים אותו ל־Git או שולחים ללקוחות. מעבירים לכל לקוח את `server.crt` ושומרים אותו בתיקיית הפרויקט, כי הלקוח קורא אותו משם כדי לאמת את תעודת השרת. הלקוחות אינם מריצים OpenSSL.
+את `server.key` משאירים במחשב השרת בלבד ואין מעלים אותו ל־Git או שולחים ללקוחות. אחרי יצירת התעודה, מעבירים לכל לקוח את `server.crt` ושומרים אותו בתיקיית הפרויקט, כי הלקוח קורא אותו משם כדי לאמת את תעודת השרת. הלקוחות אינם מריצים OpenSSL.
 
 בטרמינל נוסף הפעילו לקוח. אפשר לפתוח כמה לקוחות כדי להשתמש בכמה חשבונות:
 
@@ -94,13 +128,15 @@ python -m client.client
 
 המפתח הפרטי נשמר במחשב המשתמש בקובץ מוצפן בסיסמה, תחת `~/.secret_vault/keys` (ב־Windows: בתיקיית המשתמש). אפשר לבחור תיקייה אחרת בעזרת משתנה הסביבה `SECRET_VAULT_KEY_DIR`. השרת שומר מפתחות ציבוריים בלבד.
 
-## בדיקות
+## בדיקת התקנה מלאה
 
-כרגע הפרויקט אינו כולל תיקיית `tests` או בדיקות אוטומטיות. אפשר לבדוק תחביר באמצעות:
+הקובץ `test_installation.py` נמצא בהורדה המלאה בלבד, כי הוא בודק גם את קובצי השרת וגם את קובצי הלקוח. אחרי התקנת כל התלויות, יצירת התעודה והמפתח עם OpenSSL, והפעלת השרת בטרמינל הראשון, הריצו בטרמינל נוסף:
 
 ```powershell
-python -m compileall -q client common server
+python -m unittest test_installation -v
 ```
+
+הבדיקה מוודאת שהתלויות וקובצי שני הצדדים זמינים, יוצרת חיבור TLS 1.3 לשרת המקומי, ושולחת בקשת פרוטוקול לא מאומתת כדי לוודא שהשרת מחזיר את שגיאת ההתחברות הנדרשת. היא אינה יוצרת משתמש או משנה קבצים במסד הנתונים.
 
 ## מגבלות
 
