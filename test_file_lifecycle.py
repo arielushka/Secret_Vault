@@ -23,6 +23,7 @@ class FileLifecycleTests(unittest.TestCase):
         self.db_patch = patch.object(database, "DB_PATH", self.db_path)
         self.db_patch.start()
         self.addCleanup(self.db_patch.stop)
+        # Each test starts with a separate database and four minimal accounts.
         database.create_tables()
         with closing(database.connect()) as conn:
             with conn:
@@ -47,17 +48,20 @@ class FileLifecycleTests(unittest.TestCase):
         ]
 
     def approve(self, user_id):
+        # Use the same complete encrypted-share list for each approval in these tests.
         database.set_approval(
             self.file_id, user_id, True, self.encrypted_shares
         )
 
     def test_waiting_file_does_not_expire_and_approval_has_no_deadline(self):
+        # A file does not start its short expiry period until the threshold is reached.
         database.delete_expired_files(now=time.time() + 3600)
         self.assertEqual(len(database.list_files(1)), 1)
         self.approve(1)
         self.assertIsNone(database.file_info(self.file_id, 1)["opened_at"])
 
     def test_threshold_opens_file_for_approvers_only(self):
+        # Two approvals meet this test file's threshold of two.
         self.approve(1)
         self.approve(2)
 
@@ -74,6 +78,7 @@ class FileLifecycleTests(unittest.TestCase):
             database.set_approval(self.file_id, 2, False)
 
     def test_existing_database_gets_opened_at_column(self):
+        # Simulate a database created before the opened_at column was introduced.
         self.approve(1)
         self.approve(2)
         with closing(database.connect()) as conn:
@@ -85,6 +90,7 @@ class FileLifecycleTests(unittest.TestCase):
         self.assertIsNotNone(info["opened_at"])
 
     def test_expiry_removes_file_ciphertext_and_cascaded_shares(self):
+        # Once opened, an expired file and its related data should all be removed.
         self.approve(1)
         self.approve(2)
         with closing(database.connect()) as conn:
@@ -96,15 +102,17 @@ class FileLifecycleTests(unittest.TestCase):
         self.assertEqual(database.delete_expired_files(), 1)
         self.assertFalse(self.ciphertext_path.exists())
         with closing(database.connect()) as conn:
-            self.assertIsNone(conn.execute(
-                "SELECT 1 FROM files WHERE id=?", (self.file_id,)
-            ).fetchone())
-            self.assertIsNone(conn.execute(
-                "SELECT 1 FROM file_recipients WHERE file_id=?", (self.file_id,)
-            ).fetchone())
-            self.assertIsNone(conn.execute(
-                "SELECT 1 FROM active_shares WHERE file_id=?", (self.file_id,)
-            ).fetchone())
+            # Keep the SELECT statements simple and check the returned IDs here.
+            file_ids = [row[0] for row in conn.execute("SELECT id FROM files")]
+            recipient_file_ids = [
+                row[0] for row in conn.execute("SELECT file_id FROM file_recipients")
+            ]
+            share_file_ids = [
+                row[0] for row in conn.execute("SELECT file_id FROM active_shares")
+            ]
+            self.assertNotIn(self.file_id, file_ids)
+            self.assertNotIn(self.file_id, recipient_file_ids)
+            self.assertNotIn(self.file_id, share_file_ids)
 
 
 if __name__ == "__main__":

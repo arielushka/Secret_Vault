@@ -20,11 +20,13 @@ class VaultClient:
         self.rsa_manager = None
 
     def connect(self):
+        # Verify the server certificate and require TLS 1.3 for the connection.
         context = ssl.create_default_context()
         context.minimum_version = ssl.TLSVersion.TLSv1_3
 
         context.load_verify_locations("server.crt")
 
+        # Establish TCP first, then wrap that socket with certificate-verified TLS.
         sock = socket.create_connection(
             (self.host, self.port),
             timeout=10
@@ -43,16 +45,19 @@ class VaultClient:
 
     def disconnect(self):
         if self.sock is not None:
+            # Close the socket and clear account state when leaving the client.
             self.sock.close()
             self.sock = None
         self.user_id = None
         self.rsa_manager = None
 
     def request(self, action, data=None):
+        # All client/server actions use the same length-prefixed JSON protocol.
         if self.sock is None:
             raise RuntimeError("Not connected to server")
         if data is None:
             data = {}
+        # Keep action and payload together in one protocol message.
         send_message(self.sock, {"action": action, "data": data})
         response = recv_message(self.sock)
         if response is None:
@@ -60,8 +65,10 @@ class VaultClient:
         return response
 
     def register(self, username, password):
+        # Generate and protect the private key locally before registering its public key.
         self.rsa_manager = RSAEncryption()
         self.rsa_manager.generate_keys()
+        # Encrypt the private key locally using the password before contacting server.
         prepared_path = self.rsa_manager.prepare_private_key(
             password.encode("utf-8"))
         response = self.request("REGISTER", {
@@ -70,16 +77,19 @@ class VaultClient:
             "public_key": self.rsa_manager.serialize_public_key()
         })
         if response.get("status") != "OK":
+            # Registration failed, so remove the temporary key and clear its memory copy.
             Path(prepared_path).unlink(missing_ok=True)
             self.rsa_manager = None
             return response
         self.user_id = response["data"]["user_id"]
+        # Install the local key only once the server has created the account.
         RSAEncryption.install_prepared_private_key(prepared_path, self.user_id)
         self.save_trusted_key(
             self.user_id, self.rsa_manager.serialize_public_key())
         return response
 
     def login(self, username, password):
+        # Load the local private key only after the server accepts the login.
         response = self.request(
             "LOGIN", {"username": username, "password": password})
         if response.get("status") != "OK":
@@ -96,6 +106,7 @@ class VaultClient:
             found_own_key = False
             for user in users_response["data"]["users"]:
                 if user["user_id"] == self.user_id:
+                    # Compare the private key's public half with the server's copy.
                     found_own_key = True
                     saved_key = self.rsa_manager.serialize_public_key()
                     if RSAEncryption.fingerprint(saved_key) != RSAEncryption.fingerprint(user["public_key"]):
@@ -129,14 +140,17 @@ class VaultClient:
         path = self.key_file()
         if not path.exists():
             return {}
+        # The trust file contains only key fingerprints, never private keys.
         with open(path, "r", encoding="utf-8") as file:
             return json.load(file)
 
     def save_trusted_key(self, user_id, public_key_text):
+        # Refuse key replacement so a changed identity cannot be trusted silently.
         path = self.key_file()
         path.parent.mkdir(parents=True, exist_ok=True)
         trusted = self.read_trusted_keys()
         user_key = str(user_id)
+        # A fingerprint change may signal key replacement, so never overwrite it quietly.
         fingerprint = RSAEncryption.fingerprint(public_key_text)
         if user_key in trusted and trusted[user_key] != fingerprint:
             raise ValueError(
@@ -147,6 +161,7 @@ class VaultClient:
 
     def public_key_status(self, user):
         fingerprint = RSAEncryption.fingerprint(user["public_key"])
+        # The current user's key can be verified directly against the loaded private key.
         if user["user_id"] == self.user_id and self.rsa_manager is not None:
             own_key = self.rsa_manager.serialize_public_key()
             if RSAEncryption.fingerprint(own_key) != fingerprint:
@@ -154,6 +169,7 @@ class VaultClient:
             self.save_trusted_key(self.user_id, own_key)
             return "trusted", fingerprint
         trusted = self.read_trusted_keys()
+        # Distinguish a first-seen key from a previously trusted key that changed.
         old_fingerprint = trusted.get(str(user["user_id"]))
         if old_fingerprint == fingerprint:
             return "trusted", fingerprint
@@ -165,6 +181,7 @@ class VaultClient:
         return self.request("GET_USERS")
 
     def upload_file_path(self, file_path, recipients, threshold):
+        # Require every recipient key to be trusted before encrypting for them.
         for recipient in recipients:
             status, fingerprint = self.public_key_status(recipient)
             if status != "trusted":
@@ -172,6 +189,7 @@ class VaultClient:
                     "Verify each recipient public key before uploading")
         encrypted_file, encrypted_shares = prepare_upload(
             file_path, recipients, threshold)
+        # Send only ciphertext and recipient-encrypted shares to the server.
         return self.request("UPLOAD_FILE", {
             "filename": Path(file_path).name,
             "threshold": threshold,
@@ -195,6 +213,7 @@ class VaultClient:
             info["my_encrypted_share"], self.rsa_manager.private_key, self.rsa_manager
         )
         encrypted_shares = []
+        # Re-encrypt this user's share separately for every authorized recipient.
         for recipient in info["recipients"]:
             status, fingerprint = self.public_key_status(recipient)
             if status != "trusted":
@@ -217,18 +236,21 @@ class VaultClient:
         return self.request("REVOKE_APPROVAL", {"file_id": file_id})
 
     def download_file(self, file_id, output_path):
+        # The client decrypts the shares and file; the server returns ciphertext only.
         if self.rsa_manager is None:
             raise RuntimeError("Load your private key first")
         response = self.request("DOWNLOAD_FILE", {"file_id": file_id})
         if response.get("status") != "OK":
             return response
         data = response["data"]
+        # Rebuild the AES key from this user's encrypted Shamir contributions.
         shares = []
         for encrypted_share in data["encrypted_shares"]:
             shares.append(ShareEncryption.decrypt_share(
                 encrypted_share, self.rsa_manager.private_key, self.rsa_manager
             ))
         aes_key = ShamirManager.recover_secret(shares)
+        # Decryption and local file writing happen on the client computer.
         saved_path = decrypt_file(data["encrypted_file"], aes_key, output_path)
         return {"status": "OK", "data": {"path": str(saved_path), "filename": data["filename"]}}
 

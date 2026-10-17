@@ -10,6 +10,7 @@ MAX_FILE_SIZE = 10 * 1024 * 1024
 
 
 def handle_upload(data, owner_id):
+    # Validate untrusted request fields before saving any ciphertext.
     if not isinstance(data, dict):
         raise ValueError("Invalid upload")
     filename = data.get("filename")
@@ -24,6 +25,7 @@ def handle_upload(data, owner_id):
         raise ValueError("Invalid recipients or threshold")
     if len(recipients) > 16 or not isinstance(encrypted_text, str):
         raise ValueError("Invalid upload data")
+    # Strict decoding rejects malformed Base64 instead of accepting partial data.
     try:
         encrypted_file = base64.b64decode(encrypted_text, validate=True)
     except (ValueError, binascii.Error):
@@ -31,6 +33,7 @@ def handle_upload(data, owner_id):
     if len(encrypted_file) < 28 or len(encrypted_file) > MAX_FILE_SIZE:
         raise ValueError("Invalid file size")
     known_ids = []
+    # Build a list of valid accounts before checking the supplied recipients.
     for user in get_users():
         known_ids.append(user["user_id"])
     recipient_ids = []
@@ -39,6 +42,7 @@ def handle_upload(data, owner_id):
             raise ValueError("Invalid recipient")
         user_id = item.get("user_id")
         share = item.get("encrypted_share")
+        # Check the account and encrypted share before saving any upload data.
         if user_id not in known_ids or not isinstance(share, str):
             raise ValueError("Invalid recipient share")
         try:
@@ -51,11 +55,14 @@ def handle_upload(data, owner_id):
     if len(set(recipient_ids)) != len(recipient_ids):
         raise ValueError("Duplicate recipients")
 
+    # Store ciphertext on disk; the database keeps only its path and key shares.
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    # Use a random storage name so the original filename is not a disk path.
     path = UPLOAD_DIR / (uuid.uuid4().hex + ".enc")
     with open(path, "wb") as file:
         file.write(encrypted_file)
     try:
+        # Remove the saved ciphertext if its database record cannot be created.
         file_id = save_file(owner_id, filename, path, threshold, recipients)
     except Exception:
         path.unlink(missing_ok=True)

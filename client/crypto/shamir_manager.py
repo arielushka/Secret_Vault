@@ -6,6 +6,7 @@ class ShamirManager:
 
     @staticmethod
     def split_secret(secret: bytes, threshold: int, total: int):
+        # Any threshold-sized subset of the generated shares can recover the key.
         if threshold < 2:
             raise ValueError("Invalid threshold or total")
 
@@ -16,6 +17,7 @@ class ShamirManager:
             raise ValueError("Invalid threshold or total")
 
         group_threshold = 1
+        # One group contains all recipients; threshold controls how many shares are needed.
         group_settings = [(threshold, total)]
 
         groups = generate_mnemonics(
@@ -25,9 +27,11 @@ class ShamirManager:
         )
 
         shares = groups[0]
+        # Return one encoded share for each recipient in the upload flow.
         return shares
 
     @staticmethod
     def recover_secret(shares):
+        # The Shamir library validates and combines the supplied share phrases.
         recovered_secret = combine_mnemonics(shares)
         return recovered_secret

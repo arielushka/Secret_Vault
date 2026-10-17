@@ -5,6 +5,7 @@ from client.vault_client import VaultClient
 
 
 def show_response(response):
+    # Display transport failures separately from errors returned by the server.
     if response is None:
         print("Server disconnected")
     elif response.get("status") != "OK":
@@ -14,8 +15,10 @@ def show_response(response):
 
 
 def verify_users(client, users):
+    # Trust is based on fingerprints checked out of band, not server claims alone.
     for user in users:
         status, fingerprint = client.public_key_status(user)
+        # A previously trusted key does not need another confirmation prompt.
         if status == "trusted":
             continue
         if status == "changed":
@@ -27,6 +30,7 @@ def verify_users(client, users):
         answer = input("Do they match? [y/N]: ").strip().lower()
         if answer != "y":
             raise ValueError("Public key was not trusted")
+        # Store the fingerprint only after the user confirms it out of band.
         client.save_trusted_key(user["user_id"], user["public_key"])
 
 
@@ -37,6 +41,7 @@ def register_or_login(client):
         print("2. Login")
         print("3. Exit")
         choice = input("> ").strip()
+        # Let the user exit before requesting credentials.
         if choice == "3":
             return False
         if choice not in ("1", "2"):
@@ -57,6 +62,7 @@ def register_or_login(client):
 
 
 def read_number(message):
+    # Convert digit-only input once so later code can compare numeric values.
     value = input(message).strip()
     if not value.isdigit():
         raise ValueError("Enter a number")
@@ -64,11 +70,13 @@ def read_number(message):
 
 
 def upload_file(client):
+    # Let the user choose recipients from the server's current account list.
     path = input("File path: ").strip().strip('"')
     if not Path(path).is_file():
         print("File does not exist")
         return
     response = client.get_users()
+    # Stop before collecting recipients if the server request failed.
     if response.get("status") != "OK":
         show_response(response)
         return
@@ -76,6 +84,7 @@ def upload_file(client):
     for user in users:
         print(f"{user['user_id']}: {user['username']}")
     raw_ids = input("Recipient IDs separated by commas: ")
+    # Resolve each entered number against the account list from the server.
     recipient_ids = []
     for value in raw_ids.split(","):
         value = value.strip()
@@ -94,6 +103,7 @@ def upload_file(client):
         recipients.append(found)
     verify_users(client, recipients)
     threshold = read_number("Required shares: ")
+    # The client encrypts the file and prepares each recipient's share.
     response = client.upload_file_path(path, recipients, threshold)
     show_response(response)
 
@@ -112,7 +122,8 @@ def show_files(client, action):
                 print(
                     f"{file['file_id']}: {file['filename']} (threshold {file['threshold']}) — {file['owner']}")
         print("f. Refresh")
-        file_id = input("File ID, f to refresh, or 0 to go back: ").strip().lower()
+        file_id = input(
+            "File ID, f to refresh, or 0 to go back: ").strip().lower()
         if file_id == "0":
             return
         if file_id == "f":
@@ -126,7 +137,9 @@ def show_files(client, action):
         elif selected_id:
             print("File not found in this list")
 
+
 def show_file(client, file_id):
+    # The server rechecks permissions for every action; this menu is only guidance.
     response = client.file_info(file_id)
     if response.get("status") != "OK":
         show_response(response)
@@ -136,8 +149,10 @@ def show_file(client, file_id):
         print(f"\nFile: {info['filename']}")
         print(f"Owner: {info['owner']}")
         print(f"Approvals: {info['approval_count']}/{info['threshold']}")
-        print("Your approval:", "Active" if info["your_approval"] else "Inactive")
+        print("Your approval:",
+              "Active" if info["your_approval"] else "Inactive")
         opened = info["opened_at"] is not None
+        # Show actions that match the current state and the user's permissions.
         print("Status:", "Open" if opened else "Waiting for approvals")
         actions = []
         if not opened and info["my_encrypted_share"] is not None:
@@ -157,6 +172,7 @@ def show_file(client, file_id):
         if choice == "b":
             return
         if choice == "f":
+            # Refresh the file state before rebuilding the available actions.
             response = client.file_info(file_id)
             if response.get("status") != "OK":
                 show_response(response)
@@ -171,6 +187,7 @@ def show_file(client, file_id):
             print("Choose one of the listed options")
             continue
         try:
+            # Handle one selected operation; errors return the user to this menu.
             if selected == "a":
                 verify_users(client, info["recipients"])
                 show_response(client.approve_share(info))
@@ -195,6 +212,7 @@ def show_file(client, file_id):
         except Exception as error:
             print("Could not complete action:", error)
 
+
 def logged_in_menu(client):
     while client.user_id is not None:
         print("\n1. Upload file")
@@ -203,6 +221,7 @@ def logged_in_menu(client):
         print("4. Logout")
         choice = input("> ").strip()
         try:
+            # Run one menu action at a time so failures do not close the client.
             if choice == "1":
                 upload_file(client)
             elif choice == "2":
@@ -218,6 +237,7 @@ def logged_in_menu(client):
 
 
 def main():
+    # Always close the network connection, including when a menu action fails.
     client = VaultClient()
     try:
         client.connect()

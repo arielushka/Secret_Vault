@@ -20,15 +20,18 @@ def send_error(sock, message):
     send_message(sock, {"status": "ERROR", "error": message})
 
 def handle_request(sock, request, session):
+    # Validate the outer message before choosing an action.
     if not isinstance(request, dict):
         send_error(sock, "Invalid request")
         return
     action = request.get("action")
     data = request.get("data", {})
+    # Every action expects its parameters inside a dictionary payload.
     if not isinstance(data, dict):
         send_error(sock, "Invalid data")
         return
     try:
+        # Handle authentication actions and logout before checking protected actions.
         if action == "REGISTER":
             result = register(data, session)
         elif action == "LOGIN":
@@ -36,6 +39,7 @@ def handle_request(sock, request, session):
         elif action == "LOGOUT":
             session.logout()
             result = {"status": "OK", "message": "Logged out"}
+        # Every operation after registration and login requires an active session.
         elif not session.is_authenticated():
             raise ValueError("Login required")
         elif action == "GET_USERS":
@@ -73,6 +77,7 @@ def handle_request(sock, request, session):
 
 
 def register(data, session):
+    # Validate credentials and key format before inserting the new account.
     username = data.get("username")
     password = data.get("password")
     public_key_text = data.get("public_key")
@@ -82,11 +87,13 @@ def register(data, session):
         raise ValueError("Enter a password")
     if not isinstance(public_key_text, str):
         raise ValueError("Public key is missing")
+    # Parse the PEM first, then accept only the required RSA key type and size.
     public_key = serialization.load_pem_public_key(public_key_text.encode("utf-8"))
     if not isinstance(public_key, rsa.RSAPublicKey) or public_key.key_size != 4096:
         raise ValueError("Use an RSA-4096 public key")
     conn = connect()
     try:
+        # Hash before inserting; the database never receives the plain password.
         cursor = conn.execute(
             "INSERT INTO users (username, password_hash, public_key) VALUES (?, ?, ?)",
             (username.strip(), password_hasher.hash(password), public_key_text)
@@ -102,16 +109,22 @@ def register(data, session):
 
 
 def login(data, session):
+    # Read the password hash first; verify it with Argon2 outside the database.
     username = data.get("username")
     password = data.get("password")
     if not isinstance(username, str) or not isinstance(password, str):
         raise ValueError("Enter username and password")
     conn = connect()
     try:
-        row = conn.execute(
-            "SELECT id, password_hash FROM users WHERE username=?",
-            (username.strip(),)
-        ).fetchone()
+        # Fetch rows simply, then find the requested account in Python.
+        user_rows = conn.execute(
+            "SELECT id, username, password_hash FROM users"
+        ).fetchall()
+        row = None
+        for user_id, saved_username, password_hash in user_rows:
+            if saved_username == username.strip():
+                row = (user_id, password_hash)
+                break
     finally:
         conn.close()
     if row is None:
@@ -120,6 +133,7 @@ def login(data, session):
         password_hasher.verify(row[1], password)
     except (VerificationError, InvalidHashError):
         raise ValueError("Incorrect username or password")
+    # Mark the connection as authenticated only after the password verifies.
     session.login(row[0])
     return {"status": "OK", "data": {"user_id": row[0]}}
 

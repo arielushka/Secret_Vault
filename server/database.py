@@ -1,4 +1,10 @@
-﻿import base64
+﻿
+"""Secret-Vault persistence layer.
+
+Queries fetch rows with simple SELECT statements; approval counts, access
+decisions, timeouts, filtering and sorting are calculated in Python.
+"""
+import base64
 import binascii
 import sqlite3
 import time
@@ -9,15 +15,61 @@ OPEN_FILE_SECONDS = 60
 
 
 def connect():
+    # Enable cascading foreign-key behavior for dependent file/share rows.
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
+def _approval_count(conn, file_id):
+    """Count approvals in Python instead of using a SQL aggregate/filter."""
+    # This reads every recipient row; keeping the selection simple suits this small app.
+    rows = conn.execute(
+        "SELECT file_id, approved FROM file_recipients"
+    ).fetchall()
+    count = 0
+    for row_file_id, approved in rows:
+        if row_file_id == file_id and approved == 1:
+            count += 1
+    return count
+
+
+def _recipient_row(conn, file_id, user_id):
+    # Return this user's share and approval state for the requested file.
+    rows = conn.execute(
+        "SELECT file_id, user_id, encrypted_share, approved FROM file_recipients"
+    ).fetchall()
+    for row in rows:
+        if row[0] == file_id and row[1] == user_id:
+            return row[1:]
+    return None
+
+
+def _file_row(conn, file_id):
+    # Return a file record in the same column order expected by callers.
+    rows = conn.execute(
+        "SELECT id, owner_id, filename, storage_path, threshold, opened_at FROM files"
+    ).fetchall()
+    for row in rows:
+        if row[0] == file_id:
+            return row
+    return None
+
+
+def _username(conn, user_id):
+    rows = conn.execute("SELECT id, username FROM users").fetchall()
+    for row_id, username in rows:
+        if row_id == user_id:
+            return username
+    return None
+
+
 def create_tables():
+    # Create the database directory on first run.
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = connect()
     try:
+        # Each table stores one kind of record: users, files, or file recipients.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,17 +100,36 @@ def create_tables():
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
         """)
-        file_columns = [row[1] for row in conn.execute("PRAGMA table_info(files)")]
+        # Upgrade older databases that do not have the file-open timestamp yet.
+        file_columns = [row[1]
+                        for row in conn.execute("PRAGMA table_info(files)")]
         if "opened_at" not in file_columns:
+            # Older database files need this field to track the expiry timer.
             conn.execute("ALTER TABLE files ADD COLUMN opened_at REAL")
-        old_table = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='file_shares'"
-        ).fetchone()
-        if old_table is not None:
-            conn.execute("""
-                INSERT OR IGNORE INTO file_recipients (file_id, user_id, encrypted_share)
-                SELECT file_id, user_id, encrypted_share FROM file_shares
-            """)
+        # Read table names first, then decide in Python whether the old table exists.
+        table_rows = conn.execute("SELECT name FROM sqlite_master").fetchall()
+        old_table_exists = any(row[0] == "file_shares" for row in table_rows)
+        if old_table_exists:
+            # Copy old shares into the current recipient table before removing the old table.
+            old_shares = conn.execute(
+                "SELECT file_id, user_id, encrypted_share FROM file_shares"
+            ).fetchall()
+            for file_id, user_id, encrypted_share in old_shares:
+                # Avoid a conflict clause by checking for an existing row in Python.
+                recipient_rows = conn.execute(
+                    "SELECT file_id, user_id FROM file_recipients"
+                ).fetchall()
+                already_added = False
+                for row_file_id, row_user_id in recipient_rows:
+                    if row_file_id == file_id and row_user_id == user_id:
+                        already_added = True
+                        break
+                if not already_added:
+                    conn.execute(
+                        "INSERT INTO file_recipients "
+                        "(file_id, user_id, encrypted_share) VALUES (?, ?, ?)",
+                        (file_id, user_id, encrypted_share)
+                    )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS active_shares (
                 file_id INTEGER NOT NULL,
@@ -71,58 +142,75 @@ def create_tables():
                 FOREIGN KEY (recipient_id) REFERENCES users(id)
             )
         """)
-        # Remove tables used only by the old temporary approval process.
+        # Remove obsolete tables left by the earlier opening-session design.
         conn.execute("DROP TABLE IF EXISTS opening_key_envelopes")
         conn.execute("DROP TABLE IF EXISTS opening_contributions")
         conn.execute("DROP TABLE IF EXISTS opening_votes")
         conn.execute("DROP TABLE IF EXISTS opening_sessions")
         conn.execute("DROP TABLE IF EXISTS file_shares")
-        conn.execute("""
-            UPDATE files SET opened_at=?
-            WHERE opened_at IS NULL AND
-                  (SELECT COUNT(*) FROM file_recipients r
-                   WHERE r.file_id=files.id AND r.approved=1) >= files.threshold
-        """, (time.time(),))
+
+        # Migrate preexisting files that already met their threshold.
+        files = conn.execute("SELECT id, threshold, opened_at FROM files").fetchall()
+        current_time = time.time()
+        for file_id, threshold, opened_at in files:
+            if opened_at is None and _approval_count(conn, file_id) >= threshold:
+                conn.execute(
+                    "UPDATE files SET opened_at=? WHERE id=?",
+                    (current_time, file_id)
+                )
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
 
 def delete_expired_files(now=None):
-    """Delete files, their cascading shares, and ciphertext after the open window."""
+    """Remove expired ciphertext and database rows using Python time comparisons."""
     if now is None:
         now = time.time()
     conn = connect()
     try:
-        rows = conn.execute(
-            "SELECT id, storage_path FROM files WHERE opened_at IS NOT NULL AND opened_at <= ?",
-            (now - OPEN_FILE_SECONDS,)
+        # Fetch rows first; Python decides expiration using the supplied clock.
+        files = conn.execute(
+            "SELECT id, storage_path, opened_at FROM files"
         ).fetchall()
-        if rows:
-            conn.executemany("DELETE FROM files WHERE id=?", [(row[0],) for row in rows])
+        expired = []
+        for file_id, storage_path, opened_at in files:
+            if opened_at is not None and now - opened_at >= OPEN_FILE_SECONDS:
+                expired.append((file_id, storage_path))
+        if expired:
+            # Remove database rows first; the file paths are removed after closing the DB.
+            conn.executemany(
+                "DELETE FROM files WHERE id=?",
+                [(file_id,) for file_id, _ in expired]
+            )
             conn.commit()
     finally:
         conn.close()
-    for _, storage_path in rows:
+    for _, storage_path in expired:
         try:
             Path(storage_path).unlink(missing_ok=True)
         except OSError:
             pass
-    return len(rows)
+    return len(expired)
 
 
 def get_users():
     conn = connect()
     try:
         rows = conn.execute(
-            "SELECT id, username, public_key FROM users ORDER BY id"
+            "SELECT id, username, public_key FROM users"
         ).fetchall()
+        # Keep output stable without putting ORDER BY in SQL.
+        rows.sort(key=lambda row: row[0])
         users = []
-        for row in rows:
+        for user_id, username, public_key in rows:
             users.append({
-                "user_id": row[0],
-                "username": row[1],
-                "public_key": row[2]
+                "user_id": user_id,
+                "username": username,
+                "public_key": public_key,
             })
         return users
     finally:
@@ -130,16 +218,20 @@ def get_users():
 
 
 def save_file(owner_id, filename, path, threshold, recipients):
+    # Insert the file and all recipient shares in one transaction.
     conn = connect()
     try:
         cursor = conn.execute(
-            "INSERT INTO files (owner_id, filename, storage_path, threshold) VALUES (?, ?, ?, ?)",
+            "INSERT INTO files (owner_id, filename, storage_path, threshold) "
+            "VALUES (?, ?, ?, ?)",
             (owner_id, filename, str(path), threshold)
         )
+        # The generated row ID connects each recipient share to this new file.
         file_id = cursor.lastrowid
         for recipient in recipients:
             conn.execute(
-                "INSERT INTO file_recipients (file_id, user_id, encrypted_share) VALUES (?, ?, ?)",
+                "INSERT INTO file_recipients (file_id, user_id, encrypted_share) "
+                "VALUES (?, ?, ?)",
                 (file_id, recipient["user_id"], recipient["encrypted_share"])
             )
         conn.commit()
@@ -152,109 +244,138 @@ def save_file(owner_id, filename, path, threshold, recipients):
 
 
 def list_files(user_id, owner_only=False):
+    # Expire old files before returning the current visible list.
     delete_expired_files()
     conn = connect()
     try:
-        if owner_only:
-            rows = conn.execute(
-                """SELECT f.id, f.filename, f.threshold, u.username, f.owner_id
-                   FROM files f JOIN users u ON u.id=f.owner_id
-                   WHERE f.owner_id=?
-                     AND (f.opened_at IS NULL OR EXISTS (
-                         SELECT 1 FROM file_recipients r
-                         WHERE r.file_id=f.id AND r.user_id=? AND r.approved=1
-                     ))
-                   ORDER BY f.id""", (user_id, user_id)
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """SELECT f.id, f.filename, f.threshold, u.username, f.owner_id
-                   FROM files f JOIN users u ON u.id=f.owner_id
-                   JOIN file_recipients r ON r.file_id=f.id
-                   WHERE r.user_id=? AND f.owner_id!=?
-                     AND (f.opened_at IS NULL OR r.approved=1)
-                   ORDER BY f.id""",
-                (user_id, user_id)
-            ).fetchall()
-        files = []
-        for row in rows:
-            files.append({
-                "file_id": row[0], "filename": row[1],
-                "threshold": row[2], "owner": row[3], "owner_id": row[4]
-            })
-        return files
+        files_rows = conn.execute(
+            "SELECT id, owner_id, filename, threshold, opened_at FROM files"
+        ).fetchall()
+        files_rows.sort(key=lambda row: row[0])
+        recipient_rows = conn.execute(
+            "SELECT file_id, user_id, approved FROM file_recipients"
+        ).fetchall()
+        approvals = {}
+        for file_id, recipient_id, approved in recipient_rows:
+            approvals[(file_id, recipient_id)] = approved
+        users = {}
+        for user_id_from_db, username in conn.execute(
+            "SELECT id, username FROM users"
+        ).fetchall():
+            users[user_id_from_db] = username
+
+        result = []
+        # Apply visibility rules in Python using the loaded file and approval rows.
+        for file_id, owner_id, filename, threshold, opened_at in files_rows:
+            approved = approvals.get((file_id, user_id), 0) == 1
+            if owner_only:
+                allowed = owner_id == user_id and (
+                    opened_at is None or approved)
+            else:
+                allowed = (
+                    owner_id != user_id
+                    and (file_id, user_id) in approvals
+                    and (opened_at is None or approved)
+                )
+            if allowed:
+                result.append({
+                    "file_id": file_id,
+                    "filename": filename,
+                    "threshold": threshold,
+                    "owner": users[owner_id],
+                    "owner_id": owner_id,
+                })
+        return result
     finally:
         conn.close()
+
 
 def file_info(file_id, user_id):
     delete_expired_files()
     conn = connect()
     try:
-        row = conn.execute(
-            """SELECT f.filename, f.threshold, f.owner_id, u.username,
-                      r.approved,
-                      (SELECT COUNT(*) FROM file_recipients
-                       WHERE file_id=f.id AND approved=1),
-                      f.opened_at
-               FROM files f JOIN users u ON u.id=f.owner_id
-               LEFT JOIN file_recipients r
-                 ON r.file_id=f.id AND r.user_id=?
-               WHERE f.id=? AND (f.owner_id=? OR r.user_id IS NOT NULL)
-                 AND (f.opened_at IS NULL OR r.approved=1)""",
-            (user_id, file_id, user_id)
-        ).fetchone()
-        if row is None:
+        file_row = _file_row(conn, file_id)
+        if file_row is None:
             raise ValueError("You are not allowed to view this file")
+        _, owner_id, filename, _, threshold, opened_at = file_row
+        own_recipient = _recipient_row(conn, file_id, user_id)
+        approved = own_recipient is not None and own_recipient[2] == 1
+        # An unopened file is visible to its owner and authorized recipients.
+        if (owner_id != user_id and own_recipient is None) or (opened_at is not None and not approved):
+            raise ValueError("You are not allowed to view this file")
+
         recipient_rows = conn.execute(
-            """SELECT r.user_id, u.username, u.public_key, r.encrypted_share
-               FROM file_recipients r JOIN users u ON u.id=r.user_id
-               WHERE r.file_id=? ORDER BY r.user_id""", (file_id,)
+            "SELECT file_id, user_id, encrypted_share, approved FROM file_recipients"
         ).fetchall()
+        matching_recipients = []
+        for row in recipient_rows:
+            if row[0] == file_id:
+                matching_recipients.append(row)
+        recipient_rows = matching_recipients
+        recipient_rows.sort(key=lambda row: row[1])
+        user_rows = conn.execute(
+            "SELECT id, username, public_key FROM users"
+        ).fetchall()
+        users = {}
+        for user_id_from_db, username, public_key in user_rows:
+            users[user_id_from_db] = (username, public_key)
         recipients = []
         my_share = None
-        for recipient_row in recipient_rows:
+        for _, recipient_id, encrypted_share, _ in recipient_rows:
+            # Include the public identity for each recipient, but expose only this user's share.
+            username, public_key = users[recipient_id]
             recipients.append({
-                "user_id": recipient_row[0],
-                "username": recipient_row[1],
-                "public_key": recipient_row[2]
+                "user_id": recipient_id,
+                "username": username,
+                "public_key": public_key,
             })
-            if recipient_row[0] == user_id:
-                my_share = recipient_row[3]
+            if recipient_id == user_id:
+                my_share = encrypted_share
+        approval_count = 0
+        for _, _, _, is_approved in recipient_rows:
+            if is_approved == 1:
+                approval_count += 1
         return {
-            "file_id": file_id, "filename": row[0], "threshold": row[1],
-            "owner_id": row[2], "owner": row[3],
-            "your_approval": bool(row[4]), "approval_count": row[5],
-            "opened_at": row[6],
-            "my_encrypted_share": my_share, "recipients": recipients
+            "file_id": file_id,
+            "filename": filename,
+            "threshold": threshold,
+            "owner_id": owner_id,
+            "owner": users[owner_id][0],
+            "your_approval": approved,
+            "approval_count": approval_count,
+            "opened_at": opened_at,
+            "my_encrypted_share": my_share,
+            "recipients": recipients,
         }
     finally:
         conn.close()
 
+
 def set_approval(file_id, share_owner_id, approved, encrypted_shares=None):
+    # Serialize the approval update and threshold decision in a transaction.
     delete_expired_files()
     conn = connect()
     try:
+        # Serialize approval changes and threshold checks across client threads.
         conn.execute("BEGIN IMMEDIATE")
-        recipient = conn.execute(
-            """SELECT r.approved, f.opened_at
-               FROM file_recipients r JOIN files f ON f.id=r.file_id
-               WHERE r.file_id=? AND r.user_id=?""",
-            (file_id, share_owner_id)
-        ).fetchone()
-        if recipient is None:
+        recipient = _recipient_row(conn, file_id, share_owner_id)
+        file_row = _file_row(conn, file_id)
+        if recipient is None or file_row is None:
             raise ValueError("You are not allowed to approve this file")
-        if recipient[1] is not None:
+        if file_row[5] is not None:
             raise ValueError("The file is already open")
         if approved:
+            # Validate the full share set before changing approval state.
             if not isinstance(encrypted_shares, list):
                 raise ValueError("Encrypted shares are required")
-            allowed = conn.execute(
-                "SELECT user_id FROM file_recipients WHERE file_id=? ORDER BY user_id",
-                (file_id,)
+            allowed_rows = conn.execute(
+                "SELECT file_id, user_id FROM file_recipients"
             ).fetchall()
             allowed_ids = []
-            for row in allowed:
-                allowed_ids.append(row[0])
+            for row_file_id, recipient_id in allowed_rows:
+                if row_file_id == file_id:
+                    allowed_ids.append(recipient_id)
+            allowed_ids.sort()
             seen = []
             for item in encrypted_shares:
                 if not isinstance(item, dict):
@@ -273,26 +394,29 @@ def set_approval(file_id, share_owner_id, approved, encrypted_shares=None):
                     raise ValueError("Invalid encrypted share size")
                 seen.append(target_id)
             if sorted(seen) != allowed_ids or len(set(seen)) != len(seen):
-                raise ValueError("A share is required for each authorized user")
+                raise ValueError(
+                    "A share is required for each authorized user")
             conn.execute(
                 "DELETE FROM active_shares WHERE file_id=? AND share_owner_id=?",
                 (file_id, share_owner_id)
             )
             for item in encrypted_shares:
+                # Store a copy of this user's share encrypted for every file recipient.
                 conn.execute(
                     "INSERT INTO active_shares VALUES (?, ?, ?, ?)",
-                    (file_id, share_owner_id, item["user_id"], item["encrypted_share"])
+                    (file_id, share_owner_id,
+                     item["user_id"], item["encrypted_share"])
                 )
             conn.execute(
                 "UPDATE file_recipients SET approved=1 WHERE file_id=? AND user_id=?",
                 (file_id, share_owner_id)
             )
-            conn.execute(
-                """UPDATE files SET opened_at=COALESCE(opened_at, ?)
-                   WHERE id=? AND (SELECT COUNT(*) FROM file_recipients
-                                   WHERE file_id=? AND approved=1) >= threshold""",
-                (time.time(), file_id, file_id)
-            )
+            # The SQL update only writes; counting and the threshold decision are Python.
+            if _approval_count(conn, file_id) >= file_row[4]:
+                conn.execute(
+                    "UPDATE files SET opened_at=? WHERE id=?",
+                    (time.time(), file_id)
+                )
         else:
             conn.execute(
                 "UPDATE file_recipients SET approved=0 WHERE file_id=? AND user_id=?",
@@ -311,73 +435,77 @@ def set_approval(file_id, share_owner_id, approved, encrypted_shares=None):
 
 
 def download_file(file_id, user_id):
+    # Check access and gather only shares belonging to currently approved users.
     delete_expired_files()
     conn = connect()
     try:
-        file_row = conn.execute(
-            """SELECT f.filename, f.storage_path, f.threshold, f.opened_at, r.approved
-               FROM files f JOIN file_recipients r ON r.file_id=f.id
-               WHERE f.id=? AND r.user_id=?""", (file_id, user_id)
-        ).fetchone()
-        if file_row is None:
+        file_row = _file_row(conn, file_id)
+        recipient = _recipient_row(conn, file_id, user_id)
+        if file_row is None or recipient is None:
             raise ValueError("You are not allowed to download this file")
-        if file_row[3] is None:
+        _, _, filename, storage_path, threshold, opened_at = file_row
+        if opened_at is None:
             raise ValueError("The file is not open yet")
-        if not file_row[4]:
+        if recipient[2] != 1:
             raise ValueError("Only users who approved this file can access it")
-        count = conn.execute(
-            "SELECT COUNT(*) FROM file_recipients WHERE file_id=? AND approved=1",
-            (file_id,)
-        ).fetchone()[0]
-        if count < file_row[2]:
+        if _approval_count(conn, file_id) < threshold:
             raise ValueError("Not enough active approvals")
-        rows = conn.execute(
-            """SELECT s.encrypted_share FROM active_shares s
-               JOIN file_recipients r ON r.file_id=s.file_id AND r.user_id=s.share_owner_id
-               WHERE s.file_id=? AND s.recipient_id=? AND r.approved=1
-               ORDER BY s.share_owner_id""", (file_id, user_id)
+
+        # Fetch contributions and approvals; Python decides which contributions count.
+        all_shares = conn.execute(
+            "SELECT file_id, share_owner_id, recipient_id, encrypted_share "
+            "FROM active_shares"
         ).fetchall()
-        if len(rows) < file_row[2]:
+        shares = []
+        for share_file_id, owner_id, recipient_id, encrypted_share in all_shares:
+            if share_file_id == file_id and recipient_id == user_id:
+                shares.append((owner_id, encrypted_share))
+        shares.sort(key=lambda row: row[0])
+
+        all_approvals = conn.execute(
+            "SELECT file_id, user_id, approved FROM file_recipients"
+        ).fetchall()
+        approvals = {}
+        for approval_file_id, approver_id, is_approved in all_approvals:
+            if approval_file_id == file_id:
+                approvals[approver_id] = is_approved
+        selected = []
+        for owner_id, encrypted_share in shares:
+            if approvals.get(owner_id) == 1:
+                selected.append(encrypted_share)
+        if len(selected) < threshold:
             raise ValueError("Not enough encrypted shares are available")
-        with open(file_row[1], "rb") as file:
+        # Read the encrypted file only after all access and threshold checks pass.
+        with open(storage_path, "rb") as file:
             encrypted_file = file.read()
         return {
-            "filename": file_row[0],
+            "filename": filename,
             "encrypted_file": base64.b64encode(encrypted_file).decode("ascii"),
-            "encrypted_shares": [row[0] for row in rows[:file_row[2]]]
+            "encrypted_shares": selected[:threshold],
         }
     finally:
         conn.close()
 
 
 def delete_file(file_id, owner_id):
+    # Only the owner may remove a file, subject to the open-file approval rule.
     delete_expired_files()
     conn = connect()
     try:
-        row = conn.execute(
-            """SELECT f.storage_path, f.opened_at,
-                      EXISTS(SELECT 1 FROM file_recipients r
-                             WHERE r.file_id=f.id AND r.user_id=? AND r.approved=1)
-               FROM files f WHERE f.id=? AND f.owner_id=?""",
-            (owner_id, file_id, owner_id)
-        ).fetchone()
-        if row is None:
+        file_row = _file_row(conn, file_id)
+        if file_row is None or file_row[1] != owner_id:
             raise ValueError("Only the owner can delete this file")
-        if row[1] is not None and not row[2]:
+        opened_at = file_row[5]
+        own_recipient = _recipient_row(conn, file_id, owner_id)
+        approved = own_recipient is not None and own_recipient[2] == 1
+        if opened_at is not None and not approved:
             raise ValueError("Only users who approved this file can access it")
+        # Cascading foreign keys remove recipient and active-share rows with the file.
         conn.execute("DELETE FROM files WHERE id=?", (file_id,))
         conn.commit()
         try:
-            Path(row[0]).unlink(missing_ok=True)
+            Path(file_row[3]).unlink(missing_ok=True)
         except OSError:
             pass
     finally:
         conn.close()
-
-
-
-
-
-
-
-

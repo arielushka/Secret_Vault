@@ -6,6 +6,7 @@ from client.crypto.shamir_manager import ShamirManager
 from client.crypto.share_encryption import ShareEncryption
 
 def prepare_upload(file_path, recipients, threshold):
+    # Validate the sharing rules before reading or encrypting the file.
     if not isinstance(recipients, list):
         raise ValueError("Recipients must be a list")
 
@@ -23,11 +24,14 @@ def prepare_upload(file_path, recipients, threshold):
     if recipient_count > 16:
         raise ValueError("Invalid threshold or recipient count")
 
+    # Encrypt the file once; only the AES key is split among recipients.
     aes = AESEncryption()
 
     with open(file_path, "rb") as input_file:
+        # Read the original bytes only after validating the sharing parameters.
         file_data = input_file.read()
 
+    # Store a nonce beside ciphertext so the client can decrypt it later.
     nonce, ciphertext = aes.encrypt(file_data)
     encrypted_file_bytes = nonce + ciphertext
     encrypted_file = base64.b64encode(encrypted_file_bytes).decode("ascii")
@@ -38,9 +42,11 @@ def prepare_upload(file_path, recipients, threshold):
         recipient_count
     )
     rsa_manager = RSAEncryption()
+    # Collect the encrypted version of each recipient's key share.
     encrypted_shares = []
     seen_user_ids = set()
 
+    # Encrypt each key share for its recipient so the server never sees it.
     for index in range(recipient_count):
         recipient = recipients[index]
 
@@ -50,6 +56,7 @@ def prepare_upload(file_path, recipients, threshold):
         user_id = recipient.get("user_id")
         public_key_text = recipient.get("public_key")
 
+        # Reject invalid or repeated IDs before pairing users with shares.
         if isinstance(user_id, bool) or not isinstance(user_id, int):
             raise ValueError("Invalid recipient ID")
 
@@ -78,15 +85,18 @@ def prepare_upload(file_path, recipients, threshold):
 
 
 def decrypt_file(encrypted_file_text, aes_key, output_path):
+    # Authenticate and decrypt the complete ciphertext before writing output.
     encrypted_file_bytes = base64.b64decode(encrypted_file_text, validate=True)
     if len(encrypted_file_bytes) < 12 + 16:
         raise ValueError("Encrypted file is incomplete")
 
     nonce = encrypted_file_bytes[:12]
+    # Everything after the fixed-size nonce is the authenticated ciphertext.
     ciphertext = encrypted_file_bytes[12:]
     aes_manager = AESEncryption(aes_key)
     file_data = aes_manager.decrypt(ciphertext, nonce)
 
+    # Exclusive mode prevents accidentally overwriting a user's existing file.
     with open(output_path, "xb") as output_file:
         output_file.write(file_data)
 
