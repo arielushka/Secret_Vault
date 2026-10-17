@@ -1,9 +1,4 @@
-﻿
-"""Secret-Vault persistence layer.
 
-Queries fetch rows with simple SELECT statements; approval counts, access
-decisions, timeouts, filtering and sorting are calculated in Python.
-"""
 import base64
 import binascii
 import sqlite3
@@ -22,7 +17,6 @@ def connect():
 
 
 def _approval_count(conn, file_id):
-    """Count approvals in Python instead of using a SQL aggregate/filter."""
     # This reads every recipient row; keeping the selection simple suits this small app.
     rows = conn.execute(
         "SELECT file_id, approved FROM file_recipients"
