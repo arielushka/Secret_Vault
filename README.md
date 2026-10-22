@@ -110,25 +110,7 @@ python -m client.client
 
 המפתח הפרטי של כל משתמש נשמר מוצפן בסיסמה בתיקייה `~/.secret_vault/keys`. ניתן לשנות מיקום זה באמצעות משתנה הסביבה `SECRET_VAULT_KEY_DIR`.
 
-## בדיקות
 
-בדיקת מחזור החיים משתמשת במסד נתונים זמני ואינה מחייבת שרת פעיל:
-
-</div>
-
-```powershell
-python -m unittest test_file_lifecycle -v
-```
-
-<div dir="rtl" align="right">
-
-בדיקת ההתקנה וחיבור TLS מחייבת שתעודת השרת קיימת ושהשרת המקומי פועל:
-
-</div>
-
-```powershell
-python -m unittest test_installation -v
-```
 
 <div dir="rtl" align="right">
 
