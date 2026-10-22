@@ -46,7 +46,7 @@ Secret-Vault הוא פרויקט, המבוסס על ארכיטקטורת לקו�
 - `server/handlers.py` — טיפול בבקשות והפעלת פעולות השרת.
 - `server/file_handler.py` — קליטת הקובץ המוצפן ושמירתו בדיסק.
 - `server/database.py` — פעולות SQLite, אישורים, הרשאות ומחזור חיי הקבצים.
-- `test_file_lifecycle.py`, `test_installation.py` — בדיקות מחזור חיים והתקנה.
+
 
 ## התקנה (Windows / PowerShell)
 
