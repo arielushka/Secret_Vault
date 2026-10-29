@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local database and encrypted file storage
+database/*.db
+database/*.db-*
+server/uploads/
+
+# Local TLS private key and user key material
+server.key
+*.pem
+trusted_keys.json
+
+# Local smoke-check data
+.smoke_tmp/
