@@ -1,2 +1,3 @@
 orjson
 pycryptodome
+argon2-cffi
